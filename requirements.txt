@@ -1,3 +1,0 @@
-flask==3.0.3
-pywebpush==2.0.0
-cryptography==42.0.8
