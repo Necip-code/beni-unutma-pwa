@@ -342,7 +342,8 @@ async function saveTask() {
   if (!title || !dtVal) { alert("Lütfen görev ve tarih gir!"); return; }
 
   // Send datetime-local value as-is, server is already in Istanbul TZ
-  const alarm = dtVal + ":00";
+  // Add Istanbul offset (+03:00) to prevent UTC conversion
+  const alarm = dtVal + ':00+03:00';
   await fetch("/api/tasks", {
     method:"POST",
     headers:{"Content-Type":"application/json"},
