@@ -27,9 +27,10 @@ def init_db():
                 CREATE TABLE IF NOT EXISTS tasks (
                     id BIGINT PRIMARY KEY,
                     title TEXT NOT NULL,
-                    alarm TIMESTAMPTZ NOT NULL,
+                    alarm_str TEXT NOT NULL,
+                    alarm_ts BIGINT NOT NULL,
                     status TEXT DEFAULT 'pending',
-                    completed_at TIMESTAMPTZ
+                    completed_at TEXT
                 )
             """)
             cur.execute("""
@@ -40,12 +41,10 @@ def init_db():
             """)
         conn.commit()
 
-# ── VAPID public key
 @app.route("/api/vapid-public-key")
 def vapid_public_key():
     return jsonify({"key": VAPID_PUBLIC_KEY})
 
-# ── Push subscription
 @app.route("/api/subscribe", methods=["POST"])
 def subscribe():
     sub = request.get_json()
@@ -59,23 +58,22 @@ def subscribe():
         conn.commit()
     return jsonify({"ok": True})
 
-# ── Tasks
 @app.route("/api/tasks", methods=["GET"])
 def get_tasks():
     with get_db() as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT * FROM tasks WHERE status='pending' ORDER BY alarm")
+            cur.execute("SELECT * FROM tasks WHERE status='pending' ORDER BY alarm_ts")
             pending = [dict(r) for r in cur.fetchall()]
-            cur.execute("SELECT * FROM tasks WHERE status='done' ORDER BY completed_at DESC LIMIT 50")
+            cur.execute("SELECT * FROM tasks WHERE status='done' ORDER BY id DESC LIMIT 50")
             done = [dict(r) for r in cur.fetchall()]
 
     def fmt(t):
         return {
             "id": t["id"],
             "title": t["title"],
-            "alarm": t["alarm"].isoformat() if hasattr(t["alarm"], "isoformat") else t["alarm"],
+            "alarm": t["alarm_str"],
             "status": t["status"],
-            "completedAt": t["completed_at"].isoformat() if t.get("completed_at") else None,
+            "completedAt": t.get("completed_at"),
         }
 
     return jsonify({"pending": [fmt(t) for t in pending], "done": [fmt(t) for t in done]})
@@ -85,20 +83,24 @@ def add_task():
     body = request.get_json()
     now = datetime.now(TZ)
     task_id = int(now.timestamp() * 1000)
-    alarm_str = body["alarm"]
-    alarm_dt = datetime.fromisoformat(alarm_str).replace(tzinfo=None).replace(tzinfo=TZ)
+    alarm_str = body["alarm"]  # e.g. "2026-07-13T19:15:00"
+    # Parse as Istanbul time, get unix timestamp for comparison
+    dt = datetime.fromisoformat(alarm_str.replace("Z", "")).replace(tzinfo=None)
+    dt_istanbul = dt.replace(tzinfo=TZ)
+    alarm_ts = int(dt_istanbul.timestamp())
+
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "INSERT INTO tasks (id, title, alarm, status) VALUES (%s, %s, %s, 'pending')",
-                (task_id, body["title"], alarm_dt)
+                "INSERT INTO tasks (id, title, alarm_str, alarm_ts, status) VALUES (%s, %s, %s, %s, 'pending')",
+                (task_id, body["title"], alarm_str, alarm_ts)
             )
         conn.commit()
-    return jsonify({"ok": True, "task": {"id": task_id, "title": body["title"], "alarm": alarm_dt.isoformat()}})
+    return jsonify({"ok": True, "task": {"id": task_id, "title": body["title"], "alarm": alarm_str}})
 
 @app.route("/api/tasks/<int:task_id>/done", methods=["POST"])
 def mark_done(task_id):
-    now = datetime.now(TZ)
+    now = datetime.now(TZ).isoformat()
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute("UPDATE tasks SET status='done', completed_at=%s WHERE id=%s", (now, task_id))
@@ -113,7 +115,6 @@ def delete_task(task_id):
         conn.commit()
     return jsonify({"ok": True})
 
-# ── Push sender
 def send_push(payload: dict):
     with get_db() as conn:
         with conn.cursor() as cur:
@@ -139,7 +140,6 @@ def send_push(payload: dict):
                     cur.execute("DELETE FROM subscriptions WHERE endpoint=%s", (ep,))
             conn.commit()
 
-# ── Alarm loop
 def alarm_loop():
     notified = {}
     while True:
@@ -148,26 +148,23 @@ def alarm_loop():
                 with conn.cursor() as cur:
                     cur.execute("SELECT * FROM tasks WHERE status='pending'")
                     tasks = [dict(r) for r in cur.fetchall()]
-            now = datetime.now(TZ)
+            now_ts = int(datetime.now(TZ).timestamp())
             for task in tasks:
-                alarm_dt = task["alarm"]
-                if hasattr(alarm_dt, "tzinfo") and alarm_dt.tzinfo is None:
-                    alarm_dt = alarm_dt.replace(tzinfo=TZ)
-                diff = (now - alarm_dt).total_seconds()
+                alarm_ts = task["alarm_ts"]
                 task_id = task["id"]
+                diff = now_ts - alarm_ts
                 if 0 <= diff < 60 and task_id not in notified:
                     send_push({"type": "alarm", "id": task_id, "title": task["title"]})
-                    notified[task_id] = now.timestamp()
+                    notified[task_id] = now_ts
                 elif task_id in notified:
-                    elapsed = now.timestamp() - notified[task_id]
+                    elapsed = now_ts - notified[task_id]
                     if elapsed >= 15 * 60:
                         send_push({"type": "check", "id": task_id, "title": task["title"]})
-                        notified[task_id] = now.timestamp()
+                        notified[task_id] = now_ts
         except Exception as e:
             print(f"Alarm loop error: {e}")
         time.sleep(30)
 
-# ── Serve PWA
 @app.route("/")
 def index():
     return send_from_directory("static", "index.html")
