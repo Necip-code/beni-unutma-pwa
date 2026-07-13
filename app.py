@@ -15,7 +15,6 @@ TZ = ZoneInfo("Europe/Istanbul")
 VAPID_PRIVATE_KEY = os.environ.get("VAPID_PRIVATE_KEY", "")
 VAPID_PUBLIC_KEY = os.environ.get("VAPID_PUBLIC_KEY", "")
 VAPID_EMAIL = os.environ.get("VAPID_EMAIL", "mailto:admin@beniunutma.app")
-APP_PASSWORD = os.environ.get("APP_PASSWORD", "1234")
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
 
 def get_db():
@@ -41,20 +40,12 @@ def init_db():
             """)
         conn.commit()
 
-# ── Auth ──────────────────────────────────────────────────────────────────────
-@app.route("/api/login", methods=["POST"])
-def login():
-    body = request.get_json()
-    if body.get("password") == APP_PASSWORD:
-        return jsonify({"ok": True})
-    return jsonify({"ok": False, "error": "Hatalı şifre"}), 401
-
-# ── VAPID public key ──────────────────────────────────────────────────────────
+# ── VAPID public key
 @app.route("/api/vapid-public-key")
 def vapid_public_key():
     return jsonify({"key": VAPID_PUBLIC_KEY})
 
-# ── Push subscription ─────────────────────────────────────────────────────────
+# ── Push subscription
 @app.route("/api/subscribe", methods=["POST"])
 def subscribe():
     sub = request.get_json()
@@ -68,7 +59,7 @@ def subscribe():
         conn.commit()
     return jsonify({"ok": True})
 
-# ── Tasks ─────────────────────────────────────────────────────────────────────
+# ── Tasks
 @app.route("/api/tasks", methods=["GET"])
 def get_tasks():
     with get_db() as conn:
@@ -77,7 +68,7 @@ def get_tasks():
             pending = [dict(r) for r in cur.fetchall()]
             cur.execute("SELECT * FROM tasks WHERE status='done' ORDER BY completed_at DESC LIMIT 50")
             done = [dict(r) for r in cur.fetchall()]
-    
+
     def fmt(t):
         return {
             "id": t["id"],
@@ -86,7 +77,7 @@ def get_tasks():
             "status": t["status"],
             "completedAt": t["completed_at"].isoformat() if t.get("completed_at") else None,
         }
-    
+
     return jsonify({"pending": [fmt(t) for t in pending], "done": [fmt(t) for t in done]})
 
 @app.route("/api/tasks", methods=["POST"])
@@ -96,7 +87,6 @@ def add_task():
     task_id = int(now.timestamp() * 1000)
     alarm_str = body["alarm"]
     alarm_dt = datetime.fromisoformat(alarm_str).replace(tzinfo=None).replace(tzinfo=TZ)
-    
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -111,10 +101,7 @@ def mark_done(task_id):
     now = datetime.now(TZ)
     with get_db() as conn:
         with conn.cursor() as cur:
-            cur.execute(
-                "UPDATE tasks SET status='done', completed_at=%s WHERE id=%s",
-                (now, task_id)
-            )
+            cur.execute("UPDATE tasks SET status='done', completed_at=%s WHERE id=%s", (now, task_id))
         conn.commit()
     return jsonify({"ok": True})
 
@@ -126,13 +113,12 @@ def delete_task(task_id):
         conn.commit()
     return jsonify({"ok": True})
 
-# ── Push sender ───────────────────────────────────────────────────────────────
+# ── Push sender
 def send_push(payload: dict):
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT data FROM subscriptions")
             rows = cur.fetchall()
-    
     dead = []
     for row in rows:
         sub = row["data"] if isinstance(row["data"], dict) else json.loads(row["data"])
@@ -146,7 +132,6 @@ def send_push(payload: dict):
         except WebPushException as e:
             if e.response and e.response.status_code in (404, 410):
                 dead.append(sub["endpoint"])
-    
     if dead:
         with get_db() as conn:
             with conn.cursor() as cur:
@@ -154,7 +139,7 @@ def send_push(payload: dict):
                     cur.execute("DELETE FROM subscriptions WHERE endpoint=%s", (ep,))
             conn.commit()
 
-# ── Background alarm checker ──────────────────────────────────────────────────
+# ── Alarm loop
 def alarm_loop():
     notified = {}
     while True:
@@ -163,7 +148,6 @@ def alarm_loop():
                 with conn.cursor() as cur:
                     cur.execute("SELECT * FROM tasks WHERE status='pending'")
                     tasks = [dict(r) for r in cur.fetchall()]
-            
             now = datetime.now(TZ)
             for task in tasks:
                 alarm_dt = task["alarm"]
@@ -171,7 +155,6 @@ def alarm_loop():
                     alarm_dt = alarm_dt.replace(tzinfo=TZ)
                 diff = (now - alarm_dt).total_seconds()
                 task_id = task["id"]
-
                 if 0 <= diff < 60 and task_id not in notified:
                     send_push({"type": "alarm", "id": task_id, "title": task["title"]})
                     notified[task_id] = now.timestamp()
@@ -184,7 +167,7 @@ def alarm_loop():
             print(f"Alarm loop error: {e}")
         time.sleep(30)
 
-# ── Serve PWA ─────────────────────────────────────────────────────────────────
+# ── Serve PWA
 @app.route("/")
 def index():
     return send_from_directory("static", "index.html")
